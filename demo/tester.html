@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IRCTC Vacancy MCP — Tester</title>
+  <style>
+    :root {
+      --bg: #f7f6f2; --surface: #ffffff; --text: #28251d;
+      --muted: #7a7974; --primary: #01696f; --border: #d4d1ca;
+      --radius: 8px; --font: 'Segoe UI', system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); padding: 32px 16px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    p.sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; margin-top: 16px; }
+    input, select { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; background: var(--bg); color: var(--text); }
+    input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    button { margin-top: 20px; width: 100%; padding: 10px; background: var(--primary); color: #fff; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; }
+    button:hover { background: #0c4e54; }
+    button:disabled { background: var(--border); cursor: not-allowed; }
+    #output { margin-top: 20px; padding: 16px; background: #1c1b19; color: #cdccca; border-radius: var(--radius); font-family: monospace; font-size: 13px; white-space: pre-wrap; min-height: 60px; display: none; }
+    #output.visible { display: block; }
+    .server-row { display: flex; gap: 8px; margin-bottom: 0; }
+    .server-row input { flex: 1; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>IRCTC Vacancy MCP — Tester</h1>
+    <p class="sub">Tests the local HTTP server at /run. Start with: <code>uvicorn src.http_server:app --port 8000</code></p>
+
+    <label>MCP Server URL</label>
+    <div class="server-row">
+      <input id="server" type="text" value="http://localhost:8000" />
+    </div>
+
+    <label>Train Number</label>
+    <input id="train_no" type="text" placeholder="e.g. 12302" />
+
+    <label>Journey Date</label>
+    <input id="journey_date" type="date" />
+
+    <div class="row">
+      <div>
+        <label>Boarded From (station code)</label>
+        <input id="boarded_from" type="text" placeholder="e.g. NDLS" style="text-transform:uppercase" />
+      </div>
+      <div>
+        <label>Travel To (station code)</label>
+        <input id="travel_to" type="text" placeholder="e.g. CNB" style="text-transform:uppercase" />
+      </div>
+    </div>
+
+    <label>Coach Class (optional)</label>
+    <select id="cls">
+      <option value="">All classes</option>
+      <option value="SL">SL — Sleeper</option>
+      <option value="3A">3A — AC 3-Tier</option>
+      <option value="2A">2A — AC 2-Tier</option>
+      <option value="1A">1A — AC First Class</option>
+      <option value="CC">CC — Chair Car</option>
+      <option value="EC">EC — Executive Chair Car</option>
+      <option value="2S">2S — Second Sitting</option>
+    </select>
+
+    <button id="btn" onclick="run()">Check Vacant Berths</button>
+    <pre id="output"></pre>
+  </div>
+
+  <script>
+    // Set today's date as default
+    document.getElementById('journey_date').value = new Date().toISOString().split('T')[0];
+
+    async function run() {
+      const btn = document.getElementById('btn');
+      const out = document.getElementById('output');
+      btn.disabled = true;
+      btn.textContent = 'Fetching...';
+      out.textContent = '';
+      out.classList.add('visible');
+
+      const server = document.getElementById('server').value.replace(/\/$/, '');
+      const payload = {
+        tool: 'check_irctc_vacancy',
+        parameters: {
+          train_no: document.getElementById('train_no').value.trim(),
+          journey_date: document.getElementById('journey_date').value,
+          boarded_from: document.getElementById('boarded_from').value.trim().toUpperCase(),
+          travel_to: document.getElementById('travel_to').value.trim().toUpperCase(),
+        }
+      };
+      const cls = document.getElementById('cls').value;
+      if (cls) payload.parameters.cls = cls;
+
+      try {
+        const resp = await fetch(`${server}/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        out.textContent = data.result || JSON.stringify(data, null, 2);
+      } catch (e) {
+        out.textContent = `Error: ${e.message}\n\nMake sure the server is running:\n  uvicorn src.http_server:app --port 8000 --reload`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Check Vacant Berths';
+      }
+    }
+  </script>
+</body>
+</html>
