@@ -13,14 +13,28 @@ The AI/LLM never receives raw IRCTC data.
 """
 
 import asyncio
+import os
+import sys
+from pathlib import Path
 from typing import Optional
 
-from .irctc_api import (
-    train_composition,
-    all_coaches_async,
-    _fetch_schedule_async,
-)
-from .vacancy_filter import filter_vacant, format_result
+# Support both package import (from .irctc_api) and direct script/uvicorn execution
+sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    from .irctc_api import (
+        train_composition,
+        all_coaches_async,
+        _fetch_schedule_async,
+    )
+    from .vacancy_filter import filter_vacant, format_result
+except ImportError:
+    from irctc_api import (
+        train_composition,
+        all_coaches_async,
+        _fetch_schedule_async,
+    )
+    from vacancy_filter import filter_vacant, format_result
 
 
 def _stations_from_composition(comp: dict) -> list:

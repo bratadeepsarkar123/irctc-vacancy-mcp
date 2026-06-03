@@ -20,8 +20,9 @@ Confirmed endpoints (HAR capture + JS bundle analysis, NO AUTH REQUIRED for char
   GET  /eticketing/protected/mapps1/trnscheduleenquiry/{trainNo}
        response: full ordered station list (multiple known key shapes)
 
-Akamai WAF blocks datacenter IPs (Azure/GCP/AWS). Run from local/residential.
-Cloudflare Tunnel (cloudflared tunnel --url http://localhost:8000) → best for Perplexity.
+Akamai uses TLS fingerprinting — Python `requests` is silently dropped even from
+residential IPs. We use `curl_cffi` (Chrome TLS impersonation) as the primary
+HTTP client, falling back to `requests` if curl_cffi is not installed.
 """
 
 import asyncio
@@ -29,8 +30,14 @@ import os
 import time
 from typing import Optional
 
-import aiohttp
-import requests
+# curl_cffi impersonates Chrome's TLS + HTTP/2 fingerprint — bypasses Akamai fingerprint check.
+# Falls back to plain requests if not installed (will likely be blocked by Akamai).
+try:
+    from curl_cffi import requests as cffi_requests
+    _HAVE_CFFI = True
+except ImportError:
+    import requests as cffi_requests  # type: ignore[no-redef]
+    _HAVE_CFFI = False
 
 BASE = "https://www.irctc.co.in/online-charts/api"
 SCHED_BASE = "https://www.irctc.co.in/eticketing/protected/mapps1/trnscheduleenquiry"
@@ -74,26 +81,30 @@ def _inject_cookie(h: dict) -> dict:
 
 
 def _post_with_retry(url: str, body: dict, max_retries: int = 3) -> dict:
-    """POST with exponential backoff retry. Returns parsed JSON."""
+    """
+    POST with exponential backoff retry. Returns parsed JSON.
+    Uses curl_cffi (Chrome TLS impersonation) when available to bypass
+    Akamai's TLS fingerprint detection.
+    """
     headers = _inject_cookie(HEADERS)
     delay = 1.0
     last_err: Optional[Exception] = None
     for attempt in range(max_retries):
         try:
-            r = requests.post(url, json=body, headers=headers, timeout=15)
+            if _HAVE_CFFI:
+                r = cffi_requests.post(
+                    url, json=body, headers=headers,
+                    timeout=20, impersonate="chrome124"
+                )
+            else:
+                r = cffi_requests.post(url, json=body, headers=headers, timeout=20)
             r.raise_for_status()
             return r.json()
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code in (403, 429):
-                # Akamai block — backing off won't help much, but try once
-                last_err = e
-            else:
-                raise
         except Exception as e:
             last_err = e
-        if attempt < max_retries - 1:
-            time.sleep(delay)
-            delay *= 2
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2
     raise RuntimeError(f"Failed after {max_retries} retries: {last_err}")
 
 
@@ -192,11 +203,18 @@ def train_schedule(train_no: str) -> list:
       Shape D: {stationDetails:       [{stationCode, sno}, ...]}
     """
     try:
-        r = requests.get(
-            f"{SCHED_BASE}/{train_no}",
-            headers=_inject_cookie(SCHED_HEADERS),
-            timeout=15,
-        )
+        if _HAVE_CFFI:
+            r = cffi_requests.get(
+                f"{SCHED_BASE}/{train_no}",
+                headers=_inject_cookie(SCHED_HEADERS),
+                timeout=20, impersonate="chrome124",
+            )
+        else:
+            r = cffi_requests.get(
+                f"{SCHED_BASE}/{train_no}",
+                headers=_inject_cookie(SCHED_HEADERS),
+                timeout=20,
+            )
         r.raise_for_status()
         data = r.json()
     except Exception:
@@ -241,6 +259,10 @@ def train_schedule(train_no: str) -> list:
 
 
 # ── Async parallel fetch ──────────────────────────────────────────────────────
+# NOTE: We use ThreadPoolExecutor + curl_cffi (not aiohttp) because:
+#   - aiohttp uses Python's ssl module → same broken TLS fingerprint as requests
+#   - curl_cffi wraps libcurl → real Chrome TLS fingerprint + HTTP/2
+#   - ThreadPoolExecutor gives us true parallelism for I/O-bound HTTP calls
 
 async def _fetch_schedule_async(train_no: str) -> list:
     """Async wrapper around train_schedule() for use in async contexts."""
@@ -248,9 +270,7 @@ async def _fetch_schedule_async(train_no: str) -> list:
     return await loop.run_in_executor(None, train_schedule, train_no)
 
 
-async def _fetch_coach_async(
-    session: aiohttp.ClientSession,
-    semaphore: asyncio.Semaphore,
+def _fetch_coach_sync(
     train_no: str,
     jdate: str,
     boarding: str,
@@ -260,61 +280,65 @@ async def _fetch_coach_async(
     coach_name: str,
     class_code: str,
 ) -> dict:
-    """Fetch coachComposition for one coach (primary) with vacantBerth fallback."""
-    async with semaphore:
+    """Sync fetch for one coach — runs in a thread pool so curl_cffi can be used."""
+    headers = _inject_cookie(HEADERS)
+    kwargs = dict(impersonate="chrome124") if _HAVE_CFFI else {}
+
+    try:
+        # Primary: coachComposition (confirmed bdd/bsd structure from JS bundle)
+        r = cffi_requests.post(
+            f"{BASE}/coachComposition",
+            json={
+                "trainNo": train_no,
+                "jDate": jdate,
+                "boardingStation": boarding,
+                "coach": coach_name,
+                "cls": class_code,
+            },
+            headers=headers,
+            timeout=20,
+            **kwargs,
+        )
+        r.raise_for_status()
+        return {
+            "coachName": coach_name,
+            "classCode": class_code,
+            "source": "coachComposition",
+            "data": r.json(),
+        }
+    except Exception as coach_err:
+        # Fallback: vacantBerth endpoint
         try:
-            # Primary: coachComposition (confirmed bdd structure)
-            async with session.post(
-                f"{BASE}/coachComposition",
+            r = cffi_requests.post(
+                f"{BASE}/vacantBerth",
                 json={
                     "trainNo": train_no,
                     "jDate": jdate,
                     "boardingStation": boarding,
+                    "remoteStation": remote,
+                    "trainSourceStation": source,
+                    "trainStartDate": train_start_date,
                     "coach": coach_name,
-                    "cls": class_code,
+                    "clse": class_code,
+                    "chartType": "SECOND_CHART",
                 },
-                headers=_inject_cookie(HEADERS),
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                data = await resp.json(content_type=None)
-                return {
-                    "coachName": coach_name,
-                    "classCode": class_code,
-                    "source": "coachComposition",
-                    "data": data,
-                }
-        except Exception as coach_err:
-            # Fallback: vacantBerth endpoint
-            try:
-                async with session.post(
-                    f"{BASE}/vacantBerth",
-                    json={
-                        "trainNo": train_no,
-                        "jDate": jdate,
-                        "boardingStation": boarding,
-                        "remoteStation": remote,
-                        "trainSourceStation": source,
-                        "trainStartDate": train_start_date,
-                        "coach": coach_name,
-                        "clse": class_code,
-                        "chartType": "SECOND_CHART",
-                    },
-                    headers=_inject_cookie(HEADERS),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    data = await resp.json(content_type=None)
-                    return {
-                        "coachName": coach_name,
-                        "classCode": class_code,
-                        "source": "vacantBerth",
-                        "data": data,
-                    }
-            except Exception as vb_err:
-                return {
-                    "coachName": coach_name,
-                    "classCode": class_code,
-                    "error": f"coachComposition: {coach_err} | vacantBerth: {vb_err}",
-                }
+                headers=headers,
+                timeout=20,
+                **kwargs,
+            )
+            r.raise_for_status()
+            return {
+                "coachName": coach_name,
+                "classCode": class_code,
+                "source": "vacantBerth",
+                "data": r.json(),
+            }
+        except Exception as vb_err:
+            return {
+                "coachName": coach_name,
+                "classCode": class_code,
+                "error": f"coachComposition: {coach_err} | vacantBerth: {vb_err}",
+            }
 
 
 async def all_coaches_async(
@@ -328,20 +352,26 @@ async def all_coaches_async(
     concurrency: int = 5,
 ) -> list:
     """
-    Fetch coachComposition for all coaches in parallel (semaphore-limited).
-    Returns list of {coachName, classCode, source, data} or {coachName, classCode, error}.
+    Fetch coachComposition for all coaches in parallel using ThreadPoolExecutor.
+    curl_cffi (Chrome TLS) runs in threads — gets both fingerprint bypass AND parallelism.
+    concurrency=5 means at most 5 simultaneous IRCTC requests.
     """
+    import concurrent.futures
+
+    loop = asyncio.get_event_loop()
     semaphore = asyncio.Semaphore(concurrency)
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            _fetch_coach_async(
-                session, semaphore,
+
+    async def _guarded(coach: dict) -> dict:
+        async with semaphore:
+            return await loop.run_in_executor(
+                None,
+                _fetch_coach_sync,
                 train_no, jdate, boarding, remote, source, train_start_date,
-                c["coachName"], c["classCode"],
+                coach["coachName"], coach["classCode"],
             )
-            for c in coaches
-        ]
-        return await asyncio.gather(*tasks)
+
+    tasks = [_guarded(c) for c in coaches]
+    return await asyncio.gather(*tasks)
 
 
 # Legacy alias for backward compatibility with existing callers
@@ -365,3 +395,7 @@ async def all_vacant_async(train_no: str, boarding: str, remote: str,
             out.append({"coachName": r["coachName"], "classCode": r["classCode"],
                         "data": r["data"], "source": r.get("source", "")})
     return out
+
+
+
+
