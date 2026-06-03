@@ -2,8 +2,10 @@
   "mcpServers": {
     "irctc-vacancy": {
       "command": "python",
-      "args": ["/ABSOLUTE/PATH/TO/irctc-vacancy-mcp/src/mcp_server.py"],
-      "description": "IRCTC train chart vacancy checker"
+      "args": ["PATH_TO_REPO/src/mcp_server.py"],
+      "env": {
+        "IRCTC_COOKIE": ""
+      }
     }
   }
 }

@@ -1,1 +1,261 @@
-"""\nFastAPI MCP-compatible HTTP server for the IRCTC vacancy tool.\nAdd http://localhost:8000 (or your Cloudflare Tunnel URL) as a Perplexity custom connector.\n\nSingle tool: check_irctc_vacancy\n"""\n\nimport asyncio\nimport sys\nimport os\nfrom datetime import datetime\n\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n\nsys.path.insert(0, os.path.dirname(__file__))\nfrom irctc_api import train_composition, train_schedule, all_vacant_async\nfrom vacancy_filter import filter_vacant, format_result\n\napp = FastAPI(title="IRCTC Vacancy MCP", version="2.0.0")\n\n\nclass VacancyRequest(BaseModel):\n    train_no: str\n    journey_date: str\n    boarded_from: str\n    travel_to: str\n    coach_class: str | None = None\n\n\n@app.get("/")\ndef root():\n    return {"status": "ok", "tool": "irctc-vacancy-mcp", "version": "2.0.0"}\n\n\n@app.get("/health")\ndef health():\n    return {"status": "healthy"}\n\n\n@app.post("/check_irctc_vacancy")\nasync def check_vacancy(req: VacancyRequest):\n    jdate = req.journey_date.strip()\n    if len(jdate) == 10 and jdate[2] == "-":\n        jdate = datetime.strptime(jdate, "%d-%m-%Y").strftime("%Y-%m-%d")\n\n    boarding    = req.boarded_from.upper().strip()\n    travel_to   = req.travel_to.upper().strip()\n    train_no    = req.train_no.strip()\n    coach_class = req.coach_class.upper().strip() if req.coach_class else None\n\n    # Step 1: Train composition\n    try:\n        comp = train_composition(train_no, jdate, boarding)\n    except Exception as e:\n        return {"error": f"trainComposition failed: {e}"}\n    if comp.get("error"):\n        return {"error": comp["error"]}\n\n    coaches    = comp.get("cdd", [])\n    train_name = comp.get("trainName", train_no)\n    remote     = comp.get("remote") or comp.get("nextRemote") or boarding\n    source     = comp.get("from", boarding)\n    train_date = comp.get("trainStartDate", jdate)\n\n    # Step 2: Full ordered station list\n    try:\n        station_list = await asyncio.get_event_loop().run_in_executor(\n            None, train_schedule, train_no\n        )\n    except Exception:\n        station_list = []\n    if not station_list:\n        station_list = list(dict.fromkeys([source, boarding, remote, travel_to]))\n\n    # Step 3: Filter coaches by class\n    target_coaches = [\n        c for c in coaches\n        if not coach_class or c.get("classCode", "").upper() == coach_class\n    ]\n    if not target_coaches:\n        return {\n            "result": (\n                f"No {coach_class or 'any'} class coaches found in train {train_no}. "\n                f"Available: {list(set(c['classCode'] for c in coaches))}"\n            )\n        }\n\n    # Step 4: Parallel vacancy fetch\n    all_data = await all_vacant_async(\n        train_no, boarding, remote, source, train_date, target_coaches\n    )\n\n    # Step 5: Filter for user segment (pure Python, no AI)\n    vacant = filter_vacant(all_data, boarding, travel_to, coach_class, station_list)\n\n    # Step 6: Format compact string (all AI sees)\n    summary = format_result(train_name, train_no, boarding, travel_to, jdate, vacant)\n\n    return {\n        "result":          summary,\n        "vacant_count":    len(vacant),\n        "coaches_checked": len(target_coaches),\n    }\n\n\n@app.get("/tools")\ndef tools():\n    return {\n        "tools": [{\n            "name": "check_irctc_vacancy",\n            "description": (\n                "Check IRCTC train chart for vacant berths between two stations. "\n                "Returns pre-filtered list of free berths for the user's segment only."\n            ),\n            "input_schema": {\n                "type": "object",\n                "properties": {\n                    "train_no":     {"type": "string",  "description": "Train number e.g. 12302"},\n                    "journey_date": {"type": "string",  "description": "Date YYYY-MM-DD or DD-MM-YYYY"},\n                    "boarded_from": {"type": "string",  "description": "Boarding station code e.g. NDLS"},\n                    "travel_to":    {"type": "string",  "description": "Destination station code e.g. CNB"},\n                    "coach_class":  {"type": "string",  "description": "Optional: SL, 3A, 2A, 1A"},\n                },\n                "required": ["train_no", "journey_date", "boarded_from", "travel_to"],\n            },\n        }]\n    }\n\n\nif __name__ == "__main__":\n    import uvicorn\n    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)\n
+"""
+mcp_server.py — STDIO MCP Server
+=================================
+Compatible with Claude Desktop, Cursor, Windsurf, and any MCP-compliant IDE.
+
+Setup in Claude Desktop (~/.claude/claude_desktop_config.json):
+  {
+    "mcpServers": {
+      "irctc-vacancy": {
+        "command": "python",
+        "args": ["/path/to/irctc-vacancy-mcp/src/mcp_server.py"]
+      }
+    }
+  }
+
+Setup in Cursor (cursor settings → MCP):
+  {
+    "irctc-vacancy": {
+      "command": "python",
+      "args": ["/path/to/irctc-vacancy-mcp/src/mcp_server.py"]
+    }
+  }
+
+Two tools exposed:
+  find_vacant_berths       — main tool (segment-based vacancy search)
+  get_train_composition    — helper (coach list + meta)
+"""
+
+import asyncio
+import json
+import sys
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+# Allow running from any directory
+sys.path.insert(0, str(Path(__file__).parent))
+
+from main_tool import find_vacant_berths
+from irctc_api import train_composition
+
+
+# ---------------------------------------------------------------------------
+# MCP protocol helpers (JSON-RPC 2.0)
+# ---------------------------------------------------------------------------
+
+def _ok(id_: Any, result: Any) -> str:
+    return json.dumps({"jsonrpc": "2.0", "id": id_, "result": result})
+
+
+def _err(id_: Any, code: int, message: str) -> str:
+    return json.dumps({
+        "jsonrpc": "2.0",
+        "id": id_,
+        "error": {"code": code, "message": message},
+    })
+
+
+def _tool_result(id_: Any, text: str, is_error: bool = False) -> str:
+    return _ok(id_, {
+        "content": [{"type": "text", "text": text}],
+        "isError": is_error,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool definitions
+# ---------------------------------------------------------------------------
+
+TOOLS = [
+    {
+        "name": "find_vacant_berths",
+        "description": (
+            "Check IRCTC reservation chart for vacant berths on a running or departing "
+            "Indian Railways train. Returns a pre-filtered, coach-wise list of free berths "
+            "with the exact station range they are free for. "
+            "Use when the user says they are on a train and wants to find empty seats "
+            "or berths to upgrade to. All data processing is done in code — never ask "
+            "the AI to analyse raw chart data."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "train_number": {
+                    "type": "string",
+                    "description": "5-digit train number, e.g. '12302' or '12424'",
+                },
+                "journey_date": {
+                    "type": "string",
+                    "description": (
+                        "Date of travel in YYYY-MM-DD format, e.g. '2026-06-04'. "
+                        "DD-MM-YYYY is also accepted."
+                    ),
+                },
+                "boarded_from": {
+                    "type": "string",
+                    "description": "Station code where the user boarded, e.g. 'NDLS', 'CNB', 'HWH'",
+                },
+                "travel_to": {
+                    "type": "string",
+                    "description": "Destination station code, e.g. 'CNB', 'PNBE', 'DBRT'",
+                },
+                "travel_class": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Coach class to filter by: SL (Sleeper), 3A (AC 3-Tier), "
+                        "2A (AC 2-Tier), 1A (First AC), CC (Chair Car), EC (Exec Chair). "
+                        "If omitted, all classes are scanned."
+                    ),
+                },
+            },
+            "required": ["train_number", "journey_date", "boarded_from", "travel_to"],
+        },
+    },
+    {
+        "name": "get_train_composition",
+        "description": (
+            "Returns the coach layout of a train — list of coaches with their class codes "
+            "and positions from the engine. Use when the user asks about the train layout, "
+            "which coach is at which position, or wants to know available classes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "train_number": {
+                    "type": "string",
+                    "description": "5-digit train number",
+                },
+                "journey_date": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format",
+                },
+                "boarding_station": {
+                    "type": "string",
+                    "description": "Station code for boarding (required by IRCTC API)",
+                },
+            },
+            "required": ["train_number", "journey_date", "boarding_station"],
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Date normalisation
+# ---------------------------------------------------------------------------
+
+def _normalise_date(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) == 10 and raw[2] == "-" and raw[5] == "-":
+        try:
+            return datetime.strptime(raw, "%d-%m-%Y").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Request handler
+# ---------------------------------------------------------------------------
+
+async def handle_request(req: dict) -> str:
+    method = req.get("method", "")
+    id_ = req.get("id")
+    params = req.get("params", {})
+
+    if method == "initialize":
+        return _ok(id_, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "irctc-vacancy", "version": "2.0.0"},
+        })
+
+    if method == "tools/list":
+        return _ok(id_, {"tools": TOOLS})
+
+    if method == "tools/call":
+        tool_name = params.get("name")
+        args = params.get("arguments", {})
+
+        try:
+            if tool_name == "find_vacant_berths":
+                jdate = _normalise_date(str(args.get("journey_date", "")))
+                result = await find_vacant_berths(
+                    train_no=str(args["train_number"]),
+                    jdate=jdate,
+                    boarded_from=str(args["boarded_from"]),
+                    travel_to=str(args["travel_to"]),
+                    class_filter=args.get("travel_class"),
+                )
+                return _tool_result(id_, result)
+
+            elif tool_name == "get_train_composition":
+                jdate = _normalise_date(str(args.get("journey_date", "")))
+                data = train_composition(
+                    train_no=str(args["train_number"]),
+                    jdate=jdate,
+                    boarding=str(args["boarding_station"]),
+                )
+                coaches = data.get("cdd", [])
+                if not coaches:
+                    return _tool_result(
+                        id_,
+                        f"No composition data for train {args['train_number']}. "
+                        "Chart may not be prepared yet.",
+                        is_error=False,
+                    )
+                lines = [
+                    f"Train {data.get('trainNo', args['train_number'])} "
+                    f"({data.get('trainName', '')}) | {len(coaches)} coaches",
+                    f"Route: {data.get('from', '?')} → {data.get('to', '?')}",
+                    "",
+                ]
+                for c in coaches:
+                    pos = c.get("positionFromEngine")
+                    pos_str = f" pos {pos}" if pos is not None else ""
+                    vacant = c.get("vacantBerths", "?")
+                    lines.append(
+                        f"  {c.get('coachName','?'):5s} "
+                        f"({c.get('classCode','?'):3s})"
+                        f"{pos_str}  — {vacant} vacant berths"
+                    )
+                return _tool_result(id_, "\n".join(lines))
+
+            else:
+                return _err(id_, -32601, f"Unknown tool: {tool_name!r}")
+
+        except KeyError as e:
+            return _err(id_, -32602, f"Missing required parameter: {e}")
+        except Exception as e:
+            return _tool_result(id_, f"Error: {e}", is_error=True)
+
+    if method == "notifications/initialized":
+        return ""  # no response needed for notifications
+
+    return _err(id_, -32601, f"Method not supported: {method!r}")
+
+
+# ---------------------------------------------------------------------------
+# STDIO transport loop
+# ---------------------------------------------------------------------------
+
+async def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            print(_err(None, -32700, "Parse error"), flush=True)
+            continue
+
+        response = await handle_request(req)
+        if response:  # skip empty (notifications)
+            print(response, flush=True)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
