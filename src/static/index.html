@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>IRCTC Berth Finder</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0f1c;
+            --bg-secondary: #111827;
+            --bg-card: #1a2236;
+            --bg-input: #0d1424;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --border: #1e293b;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --radius: 12px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card));
+            border-bottom: 1px solid var(--border);
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+        .header-icon {
+            width: 36px; height: 36px;
+            background: linear-gradient(135deg, var(--accent), #a855f7);
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px;
+        }
+        .header-text h1 {
+            font-size: 16px; font-weight: 700;
+            background: linear-gradient(135deg, #e0e7ff, #c4b5fd);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header-text p {
+            font-size: 11px; color: var(--text-muted);
+        }
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            margin-left: auto;
+            animation: pulse 2s infinite;
+        }
+        .status-dot.offline { background: var(--error); animation: none; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
+            50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+        }
+
+        /* Messages area */
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            scroll-behavior: smooth;
+        }
+        .messages::-webkit-scrollbar { width: 4px; }
+        .messages::-webkit-scrollbar-track { background: transparent; }
+        .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+        .msg {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: var(--radius);
+            font-size: 14px;
+            line-height: 1.5;
+            word-wrap: break-word;
+            animation: fadeIn 0.25s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .msg.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, var(--accent), #7c3aed);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+        .msg.bot {
+            align-self: flex-start;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 4px;
+        }
+        .msg.system {
+            align-self: center;
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+            font-size: 12px;
+            max-width: 95%;
+        }
+        .msg.error {
+            align-self: center;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: var(--error);
+            font-size: 12px;
+            max-width: 95%;
+        }
+        .msg pre {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            margin-top: 8px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .msg table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            font-size: 12px;
+        }
+        .msg th, .msg td {
+            padding: 4px 8px;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+        .msg th {
+            background: var(--bg-input);
+            font-weight: 600;
+        }
+        .msg strong { color: var(--accent-hover); }
+
+        /* Typing indicator */
+        .typing {
+            display: flex;
+            gap: 4px;
+            padding: 12px 14px;
+            align-self: flex-start;
+        }
+        .typing span {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            animation: bounce 1.4s infinite ease-in-out;
+        }
+        .typing span:nth-child(2) { animation-delay: 0.16s; }
+        .typing span:nth-child(3) { animation-delay: 0.32s; }
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        /* Quick actions */
+        .quick-actions {
+            padding: 8px 16px;
+            display: flex;
+            gap: 8px;
+            overflow-x: auto;
+            flex-shrink: 0;
+        }
+        .quick-actions::-webkit-scrollbar { display: none; }
+        .quick-btn {
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-family: 'Inter', sans-serif;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+        .quick-btn:hover, .quick-btn:active {
+            border-color: var(--accent);
+            color: var(--accent-hover);
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        /* Input area */
+        .input-area {
+            padding: 8px 12px 12px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .input-area input {
+            flex: 1;
+            padding: 10px 14px;
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: 'Inter', sans-serif;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .input-area input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .input-area input::placeholder { color: var(--text-muted); }
+        .send-btn {
+            width: 42px; height: 42px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(135deg, var(--accent), #7c3aed);
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.15s, box-shadow 0.2s;
+            flex-shrink: 0;
+        }
+        .send-btn:hover { transform: scale(1.05); box-shadow: 0 0 16px var(--accent-glow); }
+        .send-btn:active { transform: scale(0.95); }
+        .send-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="header-icon">🚃</div>
+    <div class="header-text">
+        <h1>IRCTC Berth Finder</h1>
+        <p>Find vacant berths on any train</p>
+    </div>
+    <div class="status-dot" id="statusDot" title="Server status"></div>
+</div>
+
+<div class="messages" id="messages">
+    <div class="msg system">
+        👋 Welcome! Tell me your train number and I'll find vacant berths for you.<br>
+        Examples: "12184 today MBDP to AME" or "Show route for 15708"
+    </div>
+</div>
+
+<div class="quick-actions">
+    <button class="quick-btn" onclick="quickSend('position')">📍 Train position</button>
+    <button class="quick-btn" onclick="quickSend('route')">🗺️ Show route</button>
+    <button class="quick-btn" onclick="quickSend('vacancy')">🛏️ Free berths</button>
+    <button class="quick-btn" onclick="quickSend('help')">❓ Help</button>
+</div>
+
+<div class="input-area">
+    <input type="text" id="userInput" placeholder="Train no, stations, date..."
+           autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="send-btn" id="sendBtn" onclick="handleSend()">➤</button>
+</div>
+
+<script>
+const API_BASE = window.location.origin;
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('userInput');
+const sendBtn = document.getElementById('sendBtn');
+const statusDot = document.getElementById('statusDot');
+
+let processing = false;
+let lastTrainNo = '';
+
+// Enter key sends
+inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+    }
+});
+
+// Check server health
+async function checkHealth() {
+    try {
+        const r = await fetch(API_BASE + '/health', { signal: AbortSignal.timeout(5000) });
+        const d = await r.json();
+        statusDot.className = 'status-dot' + (d.status === 'healthy' ? '' : ' offline');
+        statusDot.title = d.cookie_set ? 'Server OK, cookie set' : 'Server OK, NO cookie';
+    } catch {
+        statusDot.className = 'status-dot offline';
+        statusDot.title = 'Server offline';
+    }
+}
+checkHealth();
+setInterval(checkHealth, 30000);
+
+function addMsg(text, type = 'bot') {
+    const div = document.createElement('div');
+    div.className = 'msg ' + type;
+    if (type === 'bot') {
+        div.innerHTML = formatBotResponse(text);
+    } else {
+        div.textContent = text;
+    }
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return div;
+}
+
+function showTyping() {
+    const div = document.createElement('div');
+    div.className = 'typing';
+    div.id = 'typing';
+    div.innerHTML = '<span></span><span></span><span></span>';
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function hideTyping() {
+    const el = document.getElementById('typing');
+    if (el) el.remove();
+}
+
+function formatBotResponse(text) {
+    // Convert pre-formatted text blocks
+    let html = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    // Bold
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // Detect schedule/table-like output (lines starting with spaces + numbers)
+    if (html.includes('──') || html.includes('Berth') || html.includes('Schedule')) {
+        const lines = html.split('\n');
+        let inPre = false;
+        let result = [];
+        for (const line of lines) {
+            if (line.match(/^  [\d\s—─]/) || line.match(/^── /) || line.match(/^  Berth/)) {
+                if (!inPre) { result.push('<pre>'); inPre = true; }
+                result.push(line);
+            } else {
+                if (inPre) { result.push('</pre>'); inPre = false; }
+                result.push(line);
+            }
+        }
+        if (inPre) result.push('</pre>');
+        html = result.join('\n');
+    }
+
+    // Line breaks
+    html = html.replace(/\n/g, '<br>');
+
+    // Emojis render naturally
+    return html;
+}
+
+// Parse user input to determine which API call to make
+function parseQuery(text) {
+    const lower = text.toLowerCase().trim();
+
+    // Extract train number (4-5 digits)
+    const trainMatch = lower.match(/\b(\d{4,5})\b/);
+    const trainNo = trainMatch ? trainMatch[1] : lastTrainNo;
+
+    if (!trainNo) {
+        return { action: 'help' };
+    }
+    lastTrainNo = trainNo;
+
+    // "route" / "stations" / "stops"
+    if (lower.match(/\b(route|stations?|stops?|list)\b/)) {
+        return { action: 'route', trainNo };
+    }
+
+    // "position" / "where" / "status" / "location"
+    if (lower.match(/\b(position|where|status|location|track|running)\b/)) {
+        return { action: 'position', trainNo };
+    }
+
+    // "help"
+    if (lower.match(/\b(help|how|what can)\b/)) {
+        return { action: 'help' };
+    }
+
+    // Vacancy query — need stations and date
+    // Try to find station codes (2-5 uppercase letters)
+    const stationCodes = text.match(/\b[A-Z]{2,5}\b/g) || [];
+    // Try to find station names from the query
+    const dateMatch = lower.match(/\b(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{4}[-\/]\d{2}[-\/]\d{2}|today|tomorrow|yesterday|kal|aaj)\b/);
+    let date = 'today';
+    if (dateMatch) {
+        const dm = dateMatch[1];
+        if (dm === 'today' || dm === 'aaj') {
+            date = new Date().toISOString().slice(0, 10);
+        } else if (dm === 'tomorrow' || dm === 'kal') {
+            const d = new Date(); d.setDate(d.getDate() + 1);
+            date = d.toISOString().slice(0, 10);
+        } else if (dm === 'yesterday') {
+            const d = new Date(); d.setDate(d.getDate() - 1);
+            date = d.toISOString().slice(0, 10);
+        } else {
+            date = dm;
+        }
+    } else {
+        date = new Date().toISOString().slice(0, 10);
+    }
+
+    // "from X to Y" pattern
+    const fromToMatch = lower.match(/(?:from\s+)?(\w+)\s+(?:to|->|→)\s+(\w+)/);
+    if (fromToMatch) {
+        let from = fromToMatch[1].toUpperCase();
+        let to = fromToMatch[2].toUpperCase();
+        return { action: 'vacancy', trainNo, from, to, date };
+    }
+
+    // Two station codes found
+    if (stationCodes.length >= 2) {
+        return { action: 'vacancy', trainNo, from: stationCodes[0], to: stationCodes[1], date };
+    }
+
+    // Just a train number — show position first
+    if (trainMatch && !fromToMatch && stationCodes.length < 2) {
+        return { action: 'position', trainNo };
+    }
+
+    return { action: 'help' };
+}
+
+async function callAPI(endpoint, params = {}) {
+    const url = new URL(API_BASE + endpoint);
+    Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null) url.searchParams.set(k, v);
+    });
+
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`API error: ${r.status}`);
+    return await r.text();
+}
+
+async function callTool(toolName, args) {
+    // Direct internal API call — calls the Python function directly via our REST wrapper
+    const r = await fetch(API_BASE + '/api/tool', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: toolName, args }),
+        signal: AbortSignal.timeout(60000),
+    });
+    if (!r.ok) {
+        const errText = await r.text();
+        throw new Error(`Tool error (${r.status}): ${errText}`);
+    }
+    return await r.json();
+}
+
+async function handleSend() {
+    const text = inputEl.value.trim();
+    if (!text || processing) return;
+
+    processing = true;
+    sendBtn.disabled = true;
+    inputEl.value = '';
+
+    addMsg(text, 'user');
+
+    const query = parseQuery(text);
+    showTyping();
+
+    try {
+        let result;
+        switch (query.action) {
+            case 'route':
+                result = await callTool('get_train_route', { train_no: query.trainNo });
+                break;
+
+            case 'position':
+                result = await callTool('get_train_position', { train_no: query.trainNo });
+                break;
+
+            case 'vacancy':
+                result = await callTool('check_irctc_vacancy', {
+                    train_no: query.trainNo,
+                    journey_date: query.date,
+                    boarding_station: query.from,
+                    destination_station: query.to,
+                });
+                break;
+
+            case 'help':
+            default:
+                result = {
+                    result: `**How to use IRCTC Berth Finder:**\n\n` +
+                    `🚂 **Find vacant berths:**\n` +
+                    `   "12184 MBDP to AME today"\n` +
+                    `   "15708 ASR to JUC tomorrow"\n\n` +
+                    `📍 **Train position:**\n` +
+                    `   "Where is 12184"\n` +
+                    `   "12184 position"\n\n` +
+                    `🗺️ **Show route:**\n` +
+                    `   "12184 route"\n` +
+                    `   "Stations on 15708"\n\n` +
+                    `💡 **Tips:**\n` +
+                    `   • Use station CODES (MBDP, AME, LKO) or tap 🗺️ to see them\n` +
+                    `   • Date: "today", "tomorrow", or DD-MM-YYYY\n` +
+                    `   • Charts available ~4-6 hrs before departure`
+                };
+                break;
+        }
+
+        hideTyping();
+        addMsg(result.result || result.error || JSON.stringify(result), 'bot');
+
+    } catch (err) {
+        hideTyping();
+        addMsg(`Error: ${err.message}`, 'error');
+    }
+
+    processing = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+}
+
+function quickSend(type) {
+    switch (type) {
+        case 'position':
+            inputEl.value = lastTrainNo ? `Where is ${lastTrainNo}` : '';
+            if (!lastTrainNo) { inputEl.placeholder = 'Enter train number first...'; return; }
+            break;
+        case 'route':
+            inputEl.value = lastTrainNo ? `${lastTrainNo} route` : '';
+            if (!lastTrainNo) { inputEl.placeholder = 'Enter train number first...'; return; }
+            break;
+        case 'vacancy':
+            inputEl.value = lastTrainNo ? `${lastTrainNo} ` : '';
+            inputEl.placeholder = lastTrainNo ? 'Add: FROM to TO today' : 'Enter: train FROM to TO';
+            inputEl.focus();
+            return;
+        case 'help':
+            inputEl.value = 'help';
+            break;
+    }
+    handleSend();
+}
+
+// Focus input on load
+inputEl.focus();
+</script>
+</body>
+</html>

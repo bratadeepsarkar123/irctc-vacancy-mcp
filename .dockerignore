@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.git/
+*.env
+irctc_cookie.env
+grab_cookie.py
+cloudflared.exe
+demo/
+tests/
+*.md
+mcp_config.json
+quick_test.py

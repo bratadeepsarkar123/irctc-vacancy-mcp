@@ -1,0 +1,9 @@
+version: "3"
+agent:
+  authtoken: 3DVg0vW5chwvCUM178haIhj2zWK_3rPE9eQCTw7cGt9ySizgP
+
+tunnels:
+  irctc-mcp:
+    proto: http
+    addr: 8001
+    domain: ammonium-atop-smith.ngrok-free.dev

@@ -9,3 +9,8 @@ data/
 *.egg-info/
 dist/
 build/
+*.exe
+*.har
+*.txt
+*.env
+irctc_cookie.env

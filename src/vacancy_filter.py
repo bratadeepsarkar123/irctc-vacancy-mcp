@@ -136,10 +136,25 @@ def _extract_bdd_berths(data: dict) -> list:
     return data.get("bdd") or []
 
 
+def _extract_vbd_entries(data: dict) -> list:
+    """
+    Extract vacant segment entries from vacantBerth response.
+    Confirmed key: `vbd` (verified from live API response 2026-06-03).
+
+    Each vbd entry represents ONE vacant window for ONE berth:
+      {fromStation, toStation, berthNo, berthCode, coachName, ...}
+
+    These are already-computed vacant windows, NOT passenger segments.
+    """
+    return data.get("vbd") or []
+
+
 def _extract_fallback_berths(data: dict) -> list:
     """
-    Extract berth list from vacantBerth or legacy response (keys unknown).
+    Extract berth list from vacantBerth or legacy response.
     Try all known key names in priority order.
+    NOTE: vacantBerth returns vbd[], not berths inside a berth wrapper.
+    This function is for legacy coachComposition-like berth-per-row formats.
     """
     return (
         data.get("berthList")
@@ -148,6 +163,11 @@ def _extract_fallback_berths(data: dict) -> list:
         or data.get("coachBerthList")
         or []
     )
+
+
+def _norm_station(code: str, station_list: list) -> str:
+    """Return the station code uppercased. Check if it exists in station_list."""
+    return code.upper() if code else ""
 
 
 def filter_vacant(
@@ -160,7 +180,11 @@ def filter_vacant(
     """
     Main filter function. Processes all_coaches_async() output.
 
-    Handles both coachComposition (bdd/bsd) and vacantBerth (fallback keys).
+    Handles three response formats:
+      1. coachComposition → bdd[]{bsd[]{occupancy, from, to, quota}}
+      2. vacantBerth → vbd[]{fromStation, toStation, berthNo, berthCode} (confirmed 2026-06-03)
+      3. Legacy fallback → berthList/berths/chartList[]
+
     Returns [{coachName, classCode, berth, berthCode, freeFrom, freeTo}, ...]
     sorted by classCode → coachName → berth number.
     """
@@ -180,7 +204,7 @@ def filter_vacant(
         data = coach.get("data", {})
         source = coach.get("source", "")
 
-        # ── coachComposition path (bdd/bsd) ──────────────────
+        # ── Path 1: coachComposition (bdd/bsd) ──────────────────
         if source == "coachComposition" or data.get("bdd"):
             for berth in _extract_bdd_berths(data):
                 # Skip disabled/under-repair berths
@@ -206,19 +230,54 @@ def filter_vacant(
                             "freeFrom": window["from"],
                             "freeTo": window["to"],
                         })
+
+        # ── Path 2: vacantBerth (vbd[]) — CONFIRMED key 2026-06-03 ──
+        elif data.get("vbd") is not None:
+            # Each vbd entry IS a vacant window — no further decomposition needed.
+            # Keys (to be confirmed from live response with cookies):
+            #   fromStation / from  → start of vacant window
+            #   toStation / to      → end of vacant window
+            #   berthNo             → berth number
+            #   berthCode           → LB/UB/MB/SL/SU
+            #   coach / coachName   → coach identifier (may not be in vbd entry)
+            for entry in _extract_vbd_entries(data):
+                # Normalise from/to station keys
+                from_stn = (
+                    entry.get("fromStation") or entry.get("from")
+                    or entry.get("fromStn") or ""
+                ).upper()
+                to_stn = (
+                    entry.get("toStation") or entry.get("to")
+                    or entry.get("toStn") or ""
+                ).upper()
+                berth_no = entry.get("berthNo") or entry.get("berth") or entry.get("berthNumber") or "?"
+                berth_code = (entry.get("berthCode") or entry.get("berthType") or "").strip()
+
+                if not from_stn or not to_stn:
+                    continue
+
+                window = {"from": from_stn, "to": to_stn}
+                if window_covers(window, b_from, b_to, stn_upper):
+                    results.append({
+                        "coachName": coach["coachName"],
+                        "classCode": cls,
+                        "berth": berth_no,
+                        "berthCode": berth_code,
+                        "freeFrom": from_stn,
+                        "freeTo": to_stn,
+                    })
+
         else:
-            # ── vacantBerth / legacy fallback path ────────────
+            # ── Path 3: Legacy fallback ────────────────────────
             for berth in _extract_fallback_berths(data):
                 berth_no = berth.get("berthNo") or berth.get("berth") or "?"
                 berth_code = (berth.get("berthCode") or berth.get("berthType") or
                               berth.get("type") or "").strip()
 
-                # Try bsd structure first (sometimes present in vacantBerth too)
                 bsd = berth.get("bsd", [])
                 if bsd:
                     windows = vacant_windows_from_bsd(bsd, stn_upper)
                 else:
-                    # Fall back to passenger list / segment list
                     passengers = (
                         berth.get("passengerList")
                         or berth.get("passengers")
@@ -254,6 +313,7 @@ def format_result(
     travel_to: str,
     jdate: str,
     vacant: list,
+    dep_time: str = "",  # Optional departure time string e.g. "19:10" for better messaging
 ) -> str:
     """
     Convert filtered results into compact human-readable string.
@@ -265,7 +325,21 @@ def format_result(
     )
 
     if not vacant:
-        return f"{header}\nNo vacant berths found for your segment."
+        # Build a helpful 'no berths' message that gives the AI context
+        dep_hint = f" (departs {dep_time})" if dep_time else ""
+        return (
+            f"{header}\n"
+            f"No vacant berths found for {boarded_from} → {travel_to}.\n"
+            f"\n"
+            f"POSSIBLE REASONS:\n"
+            f"  1. The train hasn't departed yet{dep_hint} — IRCTC shows 0 berths until\n"
+            f"     closer to departure or after chart finalization.\n"
+            f"  2. All berths on this segment are genuinely occupied.\n"
+            f"  3. The segment is valid but has no RAC/vacant allocations for this quota.\n"
+            f"\n"
+            f"SUGGESTION: If the train hasn't departed yet, check again 2-3 hours before\n"
+            f"departure when IRCTC finalizes no-shows and RAC berths."
+        )
 
     lines = [
         header,

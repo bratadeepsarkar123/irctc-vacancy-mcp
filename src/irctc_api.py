@@ -30,8 +30,15 @@ import os
 import time
 from typing import Optional
 
-# curl_cffi impersonates Chrome's TLS + HTTP/2 fingerprint — bypasses Akamai fingerprint check.
-# Falls back to plain requests if not installed (will likely be blocked by Akamai).
+# Browser-based API: only use if explicitly available AND we're not on Windows
+# (on Windows/local, curl_cffi + residential IP is more reliable than headless Playwright)
+_HAVE_BROWSER = False
+is_browser_available = lambda: False  # noqa: E731
+browser_post = None  # type: ignore
+
+
+
+# curl_cffi impersonates Chrome TLS — fallback when browser is not open.
 try:
     from curl_cffi import requests as cffi_requests
     _HAVE_CFFI = True
@@ -83,9 +90,28 @@ def _inject_cookie(h: dict) -> dict:
 def _post_with_retry(url: str, body: dict, max_retries: int = 3) -> dict:
     """
     POST with exponential backoff retry. Returns parsed JSON.
-    Uses curl_cffi (Chrome TLS impersonation) when available to bypass
-    Akamai's TLS fingerprint detection.
+
+    PRIMARY: browser_api.browser_post() — runs fetch() inside the debug Chrome
+    via CDP Runtime.evaluate. Akamai fingerprinting passes natively.
+
+    FALLBACK: curl_cffi direct HTTP (may be blocked by Akamai for guarded endpoints).
     """
+    # Extract the endpoint name from the URL for browser_api
+    endpoint = url.rsplit("/", 1)[-1]
+
+    # Try browser-based fetch first (primary — bypasses Akamai)
+    if _HAVE_BROWSER and is_browser_available():
+        try:
+            return browser_post(endpoint, body)
+        except Exception as browser_err:
+            # Log and fall through to direct HTTP
+            import logging
+            logging.getLogger(__name__).warning(
+                "browser_api failed for %s: %s. Falling back to direct HTTP.",
+                endpoint, browser_err
+            )
+
+    # Fallback: direct HTTP via curl_cffi
     headers = _inject_cookie(HEADERS)
     delay = 1.0
     last_err: Optional[Exception] = None
@@ -280,58 +306,67 @@ def _fetch_coach_sync(
     coach_name: str,
     class_code: str,
 ) -> dict:
-    """Sync fetch for one coach — runs in a thread pool so curl_cffi can be used."""
+    """
+    Sync fetch for one coach — runs in a thread pool so curl_cffi can be used.
+
+    CRITICAL: The `boardingStation` param for coachComposition must be the
+    train's `remote` (charting station returned by trainComposition), NOT
+    the user's boarding station. IRCTC prepares the chart relative to the
+    charting point. Passing the user's stop returns "No Record Found" once
+    the train has moved past it.
+    """
     headers = _inject_cookie(HEADERS)
     kwargs = dict(impersonate="chrome124") if _HAVE_CFFI else {}
 
+    # Use the charting station (remote) as boardingStation for coachComposition.
+    # Fall back to user boarding station only if remote is not set.
+    chart_boarding = remote or boarding
+
     try:
         # Primary: coachComposition (confirmed bdd/bsd structure from JS bundle)
-        r = cffi_requests.post(
+        # _post_with_retry uses browser_api first (bypasses Akamai), then curl_cffi fallback
+        data = _post_with_retry(
             f"{BASE}/coachComposition",
-            json={
+            {
                 "trainNo": train_no,
                 "jDate": jdate,
-                "boardingStation": boarding,
+                "boardingStation": chart_boarding,
                 "coach": coach_name,
                 "cls": class_code,
             },
-            headers=headers,
-            timeout=20,
-            **kwargs,
         )
-        r.raise_for_status()
+        # Treat "No Record Found" as an error so we fall through to vacantBerth
+        if data.get("error") and not data.get("bdd"):
+            raise ValueError(f"coachComposition error: {data['error']}")
         return {
             "coachName": coach_name,
             "classCode": class_code,
             "source": "coachComposition",
-            "data": r.json(),
+            "data": data,
         }
     except Exception as coach_err:
-        # Fallback: vacantBerth endpoint
+        # Fallback: vacantBerth (simpler format: per-class, chartType=1)
+        # Confirmed response key: vbd[] (2026-06-03 live test)
         try:
-            r = cffi_requests.post(
+            data = _post_with_retry(
                 f"{BASE}/vacantBerth",
-                json={
+                {
                     "trainNo": train_no,
-                    "jDate": jdate,
-                    "boardingStation": boarding,
+                    "boardingStation": chart_boarding,
                     "remoteStation": remote,
                     "trainSourceStation": source,
-                    "trainStartDate": train_start_date,
-                    "coach": coach_name,
-                    "clse": class_code,
-                    "chartType": "SECOND_CHART",
+                    "jDate": jdate,
+                    "cls": class_code,
+                    "chartType": 2,
                 },
-                headers=headers,
-                timeout=20,
-                **kwargs,
             )
-            r.raise_for_status()
+            if data.get("error") and not data.get("vbd"):
+                raise ValueError(f"vacantBerth error: {data['error']}")
             return {
                 "coachName": coach_name,
                 "classCode": class_code,
                 "source": "vacantBerth",
-                "data": r.json(),
+                "data": data,
             }
         except Exception as vb_err:
             return {

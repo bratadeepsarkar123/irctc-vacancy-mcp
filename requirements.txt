@@ -2,6 +2,8 @@ curl-cffi>=0.7
 fastapi>=0.111
 uvicorn[standard]>=0.29
 pydantic>=2.7
-pytest>=8.0
-# requests and aiohttp kept as fallbacks if curl-cffi unavailable
+mcp>=1.0
+playwright>=1.40
+websocket-client>=1.0
+# requests kept as fallback
 requests>=2.31

@@ -63,10 +63,11 @@ TOOL_MANIFEST = {
         {
             "name": "check_irctc_vacancy",
             "description": (
-                "Returns pre-filtered vacant berths for the user's travel segment. "
-                "Only berths with a vacant window that fully covers the user's journey "
-                "(boarded_from → travel_to) are returned. "
-                "The AI should NOT analyse raw data — all filtering is done in code."
+                "Returns ALL vacant berths on the train for the requested class(es). "
+                "The AI must analyse the returned list of vacant windows (freeFrom → freeTo) "
+                "and recommend berths to the user, even if they only partially cover the user's "
+                "journey segment (boarded_from → travel_to). Mention where they board and where "
+                "the seat becomes occupied again."
             ),
             "parameters": {
                 "type": "object",
@@ -130,6 +131,19 @@ async def health():
         "irctc_cookie_set": bool(os.environ.get("IRCTC_COOKIE")),
         "version": "2.0.0",
     }
+
+
+class SetCookieRequest(BaseModel):
+    cookie: str
+
+
+@app.post("/set-cookie")
+async def set_cookie(req: SetCookieRequest):
+    """Inject a fresh IRCTC session cookie into the running server without restart."""
+    if not req.cookie:
+        raise HTTPException(status_code=422, detail="cookie must not be empty")
+    os.environ["IRCTC_COOKIE"] = req.cookie
+    return {"status": "ok", "cookie_length": len(req.cookie)}
 
 
 @app.get("/tools")
