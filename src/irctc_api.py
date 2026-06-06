@@ -28,7 +28,14 @@ HTTP client, falling back to `requests` if curl_cffi is not installed.
 import asyncio
 import os
 import time
+from datetime import datetime
 from typing import Optional
+
+try:
+    from upstreams import registry, STATE_DOWN, TIER_OFFICIAL_LIVE, TIER_OFFICIAL_STATIC_CACHE, TIER_SCHEDULED_ESTIMATE
+except ImportError:
+    pass
+
 
 # Browser-based API: only use if explicitly available AND we're not on Windows
 # (on Windows/local, curl_cffi + residential IP is more reliable than headless Playwright)
@@ -91,18 +98,97 @@ def _post_with_retry(url: str, body: dict, max_retries: int = 3) -> dict:
     """
     POST with exponential backoff retry. Returns parsed JSON.
 
-    PRIMARY: browser_api.browser_post() — runs fetch() inside the debug Chrome
-    via CDP Runtime.evaluate. Akamai fingerprinting passes natively.
-
-    FALLBACK: curl_cffi direct HTTP (may be blocked by Akamai for guarded endpoints).
+    Priority order:
+      1. Residential chart worker (via tunnel) — if IRCTC_WORKER_URL is set
+      2. browser_api.browser_post() — runs fetch() inside the debug Chrome
+      3. curl_cffi direct HTTP (may be blocked by Akamai on cloud IPs)
     """
-    # Extract the endpoint name from the URL for browser_api
+    try:
+        from upstreams import registry, STATE_DOWN
+        node = registry.get("irctc_online_charts")
+        if node.get_state() == STATE_DOWN:
+            raise RuntimeError("Circuit breaker open for IRCTC Online Charts")
+    except ImportError:
+        node = None
+
+    # Extract the endpoint name from the URL for browser_api / worker routing
     endpoint = url.rsplit("/", 1)[-1]
 
-    # Try browser-based fetch first (primary — bypasses Akamai)
+    # Try residential chart worker first (primary for cloud deployments)
+    try:
+        from chart_worker_client import is_worker_configured, WorkerUnavailable
+        if is_worker_configured():
+            try:
+                from chart_worker_client import (
+                    worker_train_composition,
+                    worker_coach_composition,
+                    worker_vacant_berth,
+                )
+                worker_node = None
+                try:
+                    from upstreams import registry as _reg
+                    worker_node = _reg.get("irctc_chart_worker")
+                except ImportError:
+                    pass
+
+                if endpoint == "trainComposition":
+                    res = worker_train_composition(
+                        body.get("trainNo", ""),
+                        body.get("jDate", ""),
+                        body.get("boardingStation", ""),
+                    )
+                elif endpoint == "coachComposition":
+                    res = worker_coach_composition(
+                        body.get("trainNo", ""),
+                        body.get("jDate", ""),
+                        body.get("boardingStation", ""),
+                        body.get("coach", ""),
+                        body.get("cls", ""),
+                    )
+                elif endpoint == "vacantBerth":
+                    res = worker_vacant_berth(
+                        body.get("trainNo", ""),
+                        body.get("jDate", ""),
+                        body.get("boardingStation", ""),
+                        body.get("remoteStation", ""),
+                        body.get("trainSourceStation", ""),
+                        body.get("trainStartDate", body.get("jDate", "")),
+                        body.get("coach", ""),
+                        body.get("clse", body.get("cls", "")),
+                        body.get("chartType", 2),
+                    )
+                else:
+                    raise WorkerUnavailable(f"Unknown endpoint for worker: {endpoint}")
+
+                if worker_node:
+                    worker_node.record_success()
+                if node:
+                    node.record_success()
+                return res
+            except PermissionError:
+                # IRCTC 403 through worker — cookie issue, don't fall through
+                if worker_node:
+                    worker_node.record_failure()
+                if node:
+                    node.record_failure()
+                raise
+            except WorkerUnavailable as we:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Chart worker unavailable for %s: %s. Falling back to local methods.",
+                    endpoint, we,
+                )
+                if worker_node:
+                    worker_node.record_failure()
+    except ImportError:
+        pass  # chart_worker_client not available — skip
+
+    # Try browser-based fetch (secondary — bypasses Akamai from local)
     if _HAVE_BROWSER and is_browser_available():
         try:
-            return browser_post(endpoint, body)
+            res = browser_post(endpoint, body)
+            if node: node.record_success()
+            return res
         except Exception as browser_err:
             # Log and fall through to direct HTTP
             import logging
@@ -124,13 +210,22 @@ def _post_with_retry(url: str, body: dict, max_retries: int = 3) -> dict:
                 )
             else:
                 r = cffi_requests.post(url, json=body, headers=headers, timeout=20)
+
+            if r.status_code in (401, 403):
+                raise PermissionError(f"IRCTC returned HTTP {r.status_code} (Forbidden/Unauthorized). Cookie may be expired.")
+
             r.raise_for_status()
+            if node: node.record_success()
             return r.json()
+        except PermissionError as pe:
+            if node: node.record_failure()
+            raise pe
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
                 time.sleep(delay)
                 delay *= 2
+    if node: node.record_failure()
     raise RuntimeError(f"Failed after {max_retries} retries: {last_err}")
 
 
@@ -229,6 +324,14 @@ def train_schedule(train_no: str) -> list:
       Shape D: {stationDetails:       [{stationCode, sno}, ...]}
     """
     try:
+        from upstreams import registry, STATE_DOWN
+        node = registry.get("irctc_schedule")
+        if node.get_state() == STATE_DOWN:
+            return []
+    except ImportError:
+        node = None
+
+    try:
         if _HAVE_CFFI:
             r = cffi_requests.get(
                 f"{SCHED_BASE}/{train_no}",
@@ -243,7 +346,9 @@ def train_schedule(train_no: str) -> list:
             )
         r.raise_for_status()
         data = r.json()
+        if node: node.record_success()
     except Exception:
+        if node: node.record_failure()
         return []
 
     raw = (
@@ -343,37 +448,115 @@ def _fetch_coach_sync(
             "classCode": class_code,
             "source": "coachComposition",
             "data": data,
+            "source_metadata": {
+                "source_tier": TIER_OFFICIAL_LIVE,
+                "source_name": "IRCTC Online Charts",
+                "fetched_at_ist": datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "is_stale": False,
+                "fallback_used": False,
+                "confidence": "high",
+            }
+        }
+    except PermissionError as pe:
+        return {
+            "coachName": coach_name,
+            "classCode": class_code,
+            "error": str(pe),
         }
     except Exception as coach_err:
-        # Fallback: vacantBerth (simpler format: per-class, chartType=1)
-        # Confirmed response key: vbd[] (2026-06-03 live test)
-        try:
+        return {
+            "coachName": coach_name,
+            "classCode": class_code,
+            "error": f"coachComposition: {coach_err}",
+        }
+
+
+def _fetch_class_vacant_sync(
+    train_no: str,
+    jdate: str,
+    boarding: str,
+    remote: str,
+    source: str,
+    class_code: str,
+    chart_mode: str = "current",
+) -> dict:
+    """
+    Fetch class-level vacantBerth rows.
+
+    The IRCTC UI vacant-berth table is backed by this endpoint. It returns
+    vbd[] rows with coachName/from/to/berthNumber, so fetch it once per class
+    as supplemental evidence even when coachComposition succeeds.
+    """
+    chart_boarding = remote or boarding
+    base_body = {
+        "trainNo": train_no,
+        "jDate": jdate,
+        "boardingStation": chart_boarding,
+        "remoteStation": remote,
+        "trainSourceStation": source,
+        "cls": class_code,
+    }
+
+    mode = (chart_mode or "current").strip().lower()
+    if mode in {"historical", "history", "first", "first_chart", "past"}:
+        chart_types = (1,)
+    elif mode in {"current_only", "second", "second_chart", "latest"}:
+        chart_types = (2,)
+    else:
+        chart_types = (2, 1)
+
+    last_data: dict | None = None
+    try:
+        # Prefer the latest/current chart. If it is not prepared yet, fall back
+        # to first chart so pre-departure trains still work.
+        for chart_type in chart_types:
             data = _post_with_retry(
                 f"{BASE}/vacantBerth",
-                {
-                    "trainNo": train_no,
-                    "boardingStation": chart_boarding,
-                    "remoteStation": remote,
-                    "trainSourceStation": source,
-                    "jDate": jdate,
-                    "cls": class_code,
-                    "chartType": 2,
-                },
+                {**base_body, "chartType": chart_type},
             )
-            if data.get("error") and not data.get("vbd"):
-                raise ValueError(f"vacantBerth error: {data['error']}")
-            return {
-                "coachName": coach_name,
-                "classCode": class_code,
-                "source": "vacantBerth",
-                "data": data,
+            last_data = data
+            if data.get("vbd"):
+                return {
+                    "coachName": "ALL",
+                    "classCode": class_code,
+                    "source": "vacantBerth",
+                    "data": data,
+                    "source_metadata": {
+                        "source_tier": TIER_OFFICIAL_LIVE,
+                        "source_name": "IRCTC Online Charts",
+                        "fetched_at_ist": datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S IST"),
+                        "is_stale": False,
+                        "fallback_used": False,
+                        "confidence": "high",
+                    }
+                }
+        return {
+            "coachName": "ALL",
+            "classCode": class_code,
+            "source": "vacantBerth",
+            "data": last_data or {"vbd": [], "error": "No Record Found"},
+            "source_metadata": {
+                "source_tier": TIER_OFFICIAL_LIVE,
+                "source_name": "IRCTC Online Charts",
+                "fetched_at_ist": datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "is_stale": False,
+                "fallback_used": False,
+                "confidence": "high",
             }
-        except Exception as vb_err:
-            return {
-                "coachName": coach_name,
-                "classCode": class_code,
-                "error": f"coachComposition: {coach_err} | vacantBerth: {vb_err}",
-            }
+        }
+    except PermissionError as pe:
+        return {
+            "coachName": "ALL",
+            "classCode": class_code,
+            "error": str(pe),
+        }
+    except Exception as exc:
+        return {
+            "coachName": "ALL",
+            "classCode": class_code,
+            "source": "vacantBerth",
+            "data": {"vbd": [], "error": str(exc)},
+        }
 
 
 async def all_coaches_async(
@@ -385,6 +568,7 @@ async def all_coaches_async(
     train_start_date: str,
     coaches: list,  # [{coachName, classCode}, ...]
     concurrency: int = 5,
+    chart_mode: str = "current",
 ) -> list:
     """
     Fetch coachComposition for all coaches in parallel using ThreadPoolExecutor.
@@ -406,7 +590,30 @@ async def all_coaches_async(
             )
 
     tasks = [_guarded(c) for c in coaches]
-    return await asyncio.gather(*tasks)
+    coach_results = await asyncio.gather(*tasks)
+
+    class_codes = sorted({
+        (coach.get("classCode") or "").upper()
+        for coach in coaches
+        if coach.get("classCode")
+    })
+
+    async def _class_vacant(class_code: str) -> dict:
+        async with semaphore:
+            return await loop.run_in_executor(
+                None,
+                _fetch_class_vacant_sync,
+                train_no,
+                jdate,
+                boarding,
+                remote,
+                source,
+                class_code,
+                chart_mode,
+            )
+
+    vacant_results = await asyncio.gather(*[_class_vacant(c) for c in class_codes])
+    return coach_results + vacant_results
 
 
 # Legacy alias for backward compatibility with existing callers

@@ -7,3 +7,5 @@ playwright>=1.40
 websocket-client>=1.0
 # requests kept as fallback
 requests>=2.31
+python-dotenv>=1.0.0
+pycryptodome>=3.20
