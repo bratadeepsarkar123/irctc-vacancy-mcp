@@ -13,13 +13,16 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
+from uuid import uuid4
 
 
 STATE_OBJECT = os.environ.get("STATE_OBJECT", "worker-state.json")
+JOB_OBJECT = os.environ.get("JOB_OBJECT", "job-state.json")
 STATE_BUCKET = os.environ["STATE_BUCKET"]
 REGISTER_TOKEN = os.environ["REGISTER_TOKEN"]
 STALE_AFTER_SECS = int(os.environ.get("STALE_AFTER_SECS", "300"))
+JOB_TIMEOUT_SECS = int(os.environ.get("JOB_TIMEOUT_SECS", "110"))
 
 
 def _metadata_token() -> str:
@@ -31,18 +34,18 @@ def _metadata_token() -> str:
     return payload["access_token"]
 
 
-def _gcs_url() -> str:
-    return f"https://storage.googleapis.com/upload/storage/v1/b/{STATE_BUCKET}/o?uploadType=media&name={STATE_OBJECT}"
+def _gcs_url(name: str) -> str:
+    return f"https://storage.googleapis.com/upload/storage/v1/b/{STATE_BUCKET}/o?uploadType=media&name={quote(name, safe='')}"
 
 
-def _gcs_get_url() -> str:
-    return f"https://storage.googleapis.com/storage/v1/b/{STATE_BUCKET}/o/{STATE_OBJECT}?alt=media"
+def _gcs_get_url(name: str) -> str:
+    return f"https://storage.googleapis.com/storage/v1/b/{STATE_BUCKET}/o/{quote(name, safe='')}?alt=media"
 
 
-def save_state(state: dict) -> None:
-    data = json.dumps(state, separators=(",", ":")).encode("utf-8")
+def save_json(name: str, payload: dict) -> None:
+    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
-        _gcs_url(),
+        _gcs_url(name),
         data=data,
         method="POST",
         headers={
@@ -53,9 +56,9 @@ def save_state(state: dict) -> None:
     urllib.request.urlopen(request, timeout=10).read()
 
 
-def load_state() -> dict:
+def load_json(name: str) -> dict:
     request = urllib.request.Request(
-        _gcs_get_url(),
+        _gcs_get_url(name),
         headers={"Authorization": f"Bearer {_metadata_token()}"},
     )
     try:
@@ -64,6 +67,22 @@ def load_state() -> dict:
         if exc.code == 404:
             return {}
         raise
+
+
+def save_state(state: dict) -> None:
+    save_json(STATE_OBJECT, state)
+
+
+def load_state() -> dict:
+    return load_json(STATE_OBJECT)
+
+
+def save_job(job: dict) -> None:
+    save_json(JOB_OBJECT, job)
+
+
+def load_job() -> dict:
+    return load_json(JOB_OBJECT)
 
 
 def openapi_spec(base_url: str) -> dict:
@@ -149,6 +168,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in {"/", "/health"}:
             state = load_state()
+            job = load_job()
             last_seen = float(state.get("last_seen", 0) or 0)
             age = int(time.time() - last_seen) if last_seen else None
             _json_response(self, 200, {
@@ -157,6 +177,8 @@ class Handler(BaseHTTPRequestHandler):
                 "worker_registered": bool(state.get("worker_url")),
                 "worker_age_secs": age,
                 "worker_fresh": bool(last_seen and age is not None and age <= STALE_AFTER_SECS),
+                "poll_worker_seen": bool(state.get("poll_last_seen")),
+                "job_status": job.get("status"),
             })
             return
         _json_response(self, 404, {"detail": "not found"})
@@ -183,31 +205,78 @@ class Handler(BaseHTTPRequestHandler):
                 _json_response(self, 200, {"status": "ok", "worker_url": worker_url})
                 return
 
-            if path == "/run":
+            if path == "/worker/next":
+                token = self.headers.get("X-Register-Token", "")
+                if token != REGISTER_TOKEN:
+                    _json_response(self, 401, {"error": "invalid worker token"})
+                    return
                 state = load_state()
-                worker_url = str(state.get("worker_url", "")).rstrip("/")
-                last_seen = float(state.get("last_seen", 0) or 0)
-                age = int(time.time() - last_seen) if last_seen else None
-                if not worker_url or not last_seen or age is None or age > STALE_AFTER_SECS:
+                state["poll_last_seen"] = time.time()
+                save_state(state)
+                job = load_job()
+                if job.get("status") == "pending":
+                    job["status"] = "running"
+                    job["started_at"] = time.time()
+                    save_job(job)
                     _json_response(self, 200, {
-                        "result": (
-                            "IRCTC residential worker is offline or stale. "
-                            "Cannot verify vacant/free chart windows right now."
-                        ),
-                        "worker_status": "offline",
-                        "worker_age_secs": age,
+                        "job": {
+                            "job_id": job.get("job_id"),
+                            "request": job.get("request") or {},
+                        }
                     })
                     return
-                body_bytes = json.dumps(self._read_json()).encode("utf-8")
-                request = urllib.request.Request(
-                    f"{worker_url}/run",
-                    data=body_bytes,
-                    method="POST",
-                    headers={"Content-Type": "application/json"},
-                )
-                response = urllib.request.urlopen(request, timeout=90)
-                payload = json.loads(response.read().decode("utf-8"))
-                _json_response(self, 200, payload)
+                _json_response(self, 200, {"job": None})
+                return
+
+            if path == "/worker/complete":
+                token = self.headers.get("X-Register-Token", "")
+                if token != REGISTER_TOKEN:
+                    _json_response(self, 401, {"error": "invalid worker token"})
+                    return
+                body = self._read_json()
+                job = load_job()
+                if body.get("job_id") != job.get("job_id"):
+                    _json_response(self, 409, {"error": "job_id mismatch"})
+                    return
+                job["status"] = "completed"
+                job["completed_at"] = time.time()
+                job["result"] = body.get("result")
+                save_job(job)
+                _json_response(self, 200, {"status": "ok"})
+                return
+
+            if path == "/run":
+                current = load_job()
+                if current.get("status") in {"pending", "running"}:
+                    _json_response(self, 200, {
+                        "result": (
+                            "IRCTC worker is busy with another request. "
+                            "Please retry in a few seconds."
+                        ),
+                        "worker_status": "busy",
+                    })
+                    return
+                job = {
+                    "job_id": str(uuid4()),
+                    "status": "pending",
+                    "created_at": time.time(),
+                    "request": self._read_json(),
+                }
+                save_job(job)
+                deadline = time.time() + JOB_TIMEOUT_SECS
+                while time.time() < deadline:
+                    latest = load_job()
+                    if latest.get("job_id") == job["job_id"] and latest.get("status") == "completed":
+                        _json_response(self, 200, latest.get("result") or {"error": "empty worker result"})
+                        return
+                    time.sleep(1)
+                _json_response(self, 200, {
+                    "result": (
+                        "IRCTC residential worker did not respond before timeout. "
+                        "Cannot verify vacant/free chart windows right now."
+                    ),
+                    "worker_status": "timeout",
+                })
                 return
 
             _json_response(self, 404, {"detail": "not found"})

@@ -14,6 +14,13 @@ chmod 700 "$BOOT_DIR/irctc-start.sh"
 
 cd "$APP_DIR"
 chmod 700 scripts/termux_production_watchdog.sh
+cat > run_cloud_poller.sh <<'SH'
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+. "$HOME/.irctc-worker.env"
+python scripts/termux_cloud_poller.py
+SH
+chmod 700 run_cloud_poller.sh
 tmux has-session -t irctc-watchdog 2>/dev/null || tmux new -d -s irctc-watchdog ./scripts/termux_production_watchdog.sh
 
 echo "IRCTC watchdog started."
