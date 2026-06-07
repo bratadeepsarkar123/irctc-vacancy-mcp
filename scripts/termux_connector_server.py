@@ -9,6 +9,7 @@ needs: /health, /openapi.json, and /run.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -117,15 +118,19 @@ def run_tool(tool: str, params: dict) -> dict:
         missing = [key for key in required if not params.get(key)]
         if missing:
             return {"error": f"Missing parameters: {missing}"}
-        result = asyncio.run(find_vacant_berths(
-            train_no=str(params["train_no"]),
-            jdate=normalise_date(str(params["journey_date"])),
-            boarded_from=str(params["boarded_from"]),
-            travel_to=str(params["travel_to"]),
-            class_filter=params.get("cls"),
-            chart_mode=str(params.get("chart_mode", "current")),
-            historical_confirmed=bool(params.get("historical_confirmed", False)),
-        ))
+        kwargs = {
+            "train_no": str(params["train_no"]),
+            "jdate": normalise_date(str(params["journey_date"])),
+            "boarded_from": str(params["boarded_from"]),
+            "travel_to": str(params["travel_to"]),
+            "class_filter": params.get("cls"),
+        }
+        accepted = set(inspect.signature(find_vacant_berths).parameters)
+        if "chart_mode" in accepted:
+            kwargs["chart_mode"] = str(params.get("chart_mode", "current"))
+        if "historical_confirmed" in accepted:
+            kwargs["historical_confirmed"] = bool(params.get("historical_confirmed", False))
+        result = asyncio.run(find_vacant_berths(**kwargs))
         return {"result": result}
 
     if tool == "find_emergency_seats":
