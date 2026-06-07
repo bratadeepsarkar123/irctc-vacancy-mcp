@@ -71,7 +71,7 @@ clone_or_pull
 
 echo "Installing Termux-safe worker dependencies..."
 python -m pip install --no-cache-dir requests python-dotenv pycryptodome
-python -m pip install --no-cache-dir curl-cffi || true
+echo "Skipping curl-cffi on Android/Termux; it currently has no working wheel for this tablet target."
 
 if [ ! -f "$ENV_FILE" ]; then
   SECRET="$(python - <<'PY'
