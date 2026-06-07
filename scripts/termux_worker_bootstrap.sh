@@ -70,7 +70,7 @@ SH
 clone_or_pull
 
 echo "Installing Termux-safe worker dependencies..."
-python -m pip install --no-cache-dir fastapi uvicorn pydantic requests python-dotenv pycryptodome
+python -m pip install --no-cache-dir requests python-dotenv pycryptodome
 python -m pip install --no-cache-dir curl-cffi || true
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -127,7 +127,7 @@ cat > "$APP_DIR/run_worker.sh" <<'SH'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 . "$HOME/.irctc-worker.env"
-python -m uvicorn src.chart_worker:app --host 127.0.0.1 --port 8001
+python scripts/termux_chart_worker.py
 SH
 chmod +x "$APP_DIR/run_worker.sh"
 
