@@ -17,6 +17,17 @@ POLL_SECS = float(os.environ.get("GCP_POLL_SECS", "2"))
 SSL_CONTEXT = ssl._create_unverified_context()
 
 
+def network_hint() -> str:
+    try:
+        response = urllib.request.urlopen(f"{CONTROL_URL}/health", timeout=10, context=SSL_CONTEXT)
+        body = response.read(1000).decode("utf-8", errors="ignore").lower()
+    except Exception:
+        return ""
+    if "gateway.iitk.ac.in" in body or "fgtauth" in body or "<html" in body:
+        return "network_captive_portal_or_gateway_auth_required"
+    return ""
+
+
 def request_json(url: str, payload: dict | None = None, timeout: int = 30) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -57,7 +68,9 @@ def main() -> None:
             request_json(f"{CONTROL_URL}/worker/complete", {"job_id": job_id, "result": result}, timeout=30)
             print("job_completed", job_id, flush=True)
         except Exception as exc:
-            print("poll_error", type(exc).__name__, str(exc)[:250], flush=True)
+            hint = network_hint()
+            suffix = f" {hint}" if hint else ""
+            print("poll_error", type(exc).__name__, str(exc)[:250] + suffix, flush=True)
             time.sleep(10)
 
 
