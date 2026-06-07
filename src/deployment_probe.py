@@ -31,6 +31,13 @@ STATUS_ERROR = "error"
 STATUS_SKIPPED = "skipped"
 
 
+def sanitize_probe_error(error: str) -> str:
+    text = str(error)
+    if "header value" in text.lower() or "IRCTC_COOKIE" in text or "Cookie" in text:
+        return "request failed while preparing sanitized headers"
+    return text[:500]
+
+
 def classify_probe_failure(error: str = "", status_code: Optional[int] = None, body: str = "") -> str:
     text = f"{error} {body}".lower()
     if status_code in (401, 403, 429):
@@ -119,7 +126,7 @@ def probe_http_json(
             name,
             classify_probe_failure(str(exc)),
             latency_ms=latency_ms,
-            details={"error": str(exc)},
+            details={"error": sanitize_probe_error(str(exc))},
         )
 
 
@@ -151,7 +158,7 @@ def probe_ntes() -> Dict[str, Any]:
             "ntes_appservand_search",
             classify_probe_failure(str(exc)),
             latency_ms=latency_ms,
-            details={"error": str(exc)},
+            details={"error": sanitize_probe_error(str(exc))},
         )
 
 
@@ -177,7 +184,7 @@ def probe_irctc_schedule() -> Dict[str, Any]:
             "irctc_schedule",
             classify_probe_failure(str(exc)),
             latency_ms=latency_ms,
-            details={"error": str(exc)},
+            details={"error": sanitize_probe_error(str(exc))},
         )
 
 
@@ -244,7 +251,7 @@ def probe_irctc_charts_landing_text() -> Dict[str, Any]:
             "irctc_online_charts_landing",
             classify_probe_failure(str(exc)),
             latency_ms=latency_ms,
-            details={"error": str(exc)},
+            details={"error": sanitize_probe_error(str(exc))},
         )
 
 
@@ -280,7 +287,7 @@ def run_readiness_probe(include_chart_composition: bool = False) -> Dict[str, An
                 "irctc_train_composition",
                 classify_probe_failure(str(exc)),
                 latency_ms=latency_ms,
-                details={"error": str(exc)},
+                details={"error": sanitize_probe_error(str(exc))},
             ))
     else:
         checks.append(_result(

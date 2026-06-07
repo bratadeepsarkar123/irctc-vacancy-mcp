@@ -89,6 +89,7 @@ def _inject_cookie(h: dict) -> dict:
     (use session_helper.py to grab a valid cookie via Playwright).
     """
     cookie = os.environ.get("IRCTC_COOKIE", "")
+    cookie = cookie.replace("\r", "").replace("\n", "").strip().strip("'\"")
     if cookie:
         return {**h, "Cookie": cookie}
     return h
