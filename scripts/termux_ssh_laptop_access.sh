@@ -13,7 +13,7 @@ fi
 
 echo
 echo "Set a Termux SSH password now. You will type this password from the laptop."
-passwd
+passwd < /dev/tty > /dev/tty
 
 mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
