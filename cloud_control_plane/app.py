@@ -25,6 +25,14 @@ STALE_AFTER_SECS = int(os.environ.get("STALE_AFTER_SECS", "300"))
 JOB_TIMEOUT_SECS = int(os.environ.get("JOB_TIMEOUT_SECS", "110"))
 
 
+def job_is_stale(job: dict) -> bool:
+    """Return true when a pending/running job can no longer produce a useful reply."""
+    if job.get("status") not in {"pending", "running"}:
+        return False
+    started = float(job.get("started_at") or job.get("created_at") or 0)
+    return bool(started and time.time() - started > JOB_TIMEOUT_SECS)
+
+
 def _metadata_token() -> str:
     request = urllib.request.Request(
         "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
@@ -214,6 +222,12 @@ class Handler(BaseHTTPRequestHandler):
                 state["poll_last_seen"] = time.time()
                 save_state(state)
                 job = load_job()
+                if job_is_stale(job):
+                    job["status"] = "timed_out"
+                    job["completed_at"] = time.time()
+                    save_job(job)
+                    _json_response(self, 200, {"job": None})
+                    return
                 if job.get("status") == "pending":
                     job["status"] = "running"
                     job["started_at"] = time.time()
@@ -247,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/run":
                 current = load_job()
-                if current.get("status") in {"pending", "running"}:
+                if current.get("status") in {"pending", "running"} and not job_is_stale(current):
                     _json_response(self, 200, {
                         "result": (
                             "IRCTC worker is busy with another request. "
@@ -277,6 +291,9 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     "worker_status": "timeout",
                 })
+                job["status"] = "timed_out"
+                job["completed_at"] = time.time()
+                save_job(job)
                 return
 
             _json_response(self, 404, {"detail": "not found"})
